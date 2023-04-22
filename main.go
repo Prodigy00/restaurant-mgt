@@ -9,7 +9,7 @@ import (
 	"os"
 )
 
-var foodCollection *mongo.Collection = database.openCollection(database.Client, "food")
+var foodCollection *mongo.Collection = database.OpenCollection(database.Client, "food")
 
 func main() {
 	port := os.Getenv("PORT")

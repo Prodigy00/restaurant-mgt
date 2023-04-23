@@ -10,7 +10,11 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"log"
+	"math"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -19,7 +23,48 @@ var validate = validator.New()
 
 func GetFoods() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		var ctx, cancel = context.WithTimeout(context.Background(), 100*time.Second)
+		defer cancel()
 
+		recordPerPage, err := strconv.Atoi(c.Query("recordPerPage"))
+		if err != nil || recordPerPage < 1 {
+			recordPerPage = 10
+		}
+
+		page, err := strconv.Atoi(c.Query("page"))
+		if err != nil || page < 1 {
+			page = 1
+		}
+
+		startIdx := (page - 1) * recordPerPage
+		startIdx, err = strconv.Atoi(c.Query("startIdx"))
+
+		matchStage := bson.D{{"$match", bson.D{{}}}}
+		groupStage := bson.D{{"$group", bson.D{{"_id", "null"}}}, {"totalCount", bson.D{{"$sum", 1}}}, {"data", bson.D{{"$push", "$$ROOT"}}}}
+		projectStage := bson.D{
+			{
+				"$project", bson.D{
+					{"_id", 0},
+					{"totalCount", 1},
+					{"foodItems", bson.D{{"$slice", []interface{}{"$data", startIdx, recordPerPage}}}},
+				},
+			},
+		}
+
+		result, err := foodCollection.Aggregate(ctx, mongo.Pipeline{
+			matchStage, groupStage, projectStage,
+		})
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "error occurred while listing food items"})
+		}
+
+		var allFoods []bson.M
+		if err = result.All(ctx, &allFoods); err != nil {
+			log.Fatal(err)
+		}
+
+		c.JSON(http.StatusOK, allFoods)
 	}
 }
 
@@ -83,14 +128,70 @@ func CreateFood() gin.HandlerFunc {
 
 func UpdateFood() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		var ctx, cancel = context.WithTimeout(context.Background(), 100*time.Second)
+		defer cancel()
+		var menu models.Menu
+		var food models.Food
 
+		foodId := c.Param("foodId")
+
+		if err := c.BindJSON(&food); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		var updateDoc primitive.D
+
+		if food.Name != nil {
+			updateDoc = append(updateDoc, bson.E{"name", food.Name})
+		}
+		if food.Price != nil {
+			updateDoc = append(updateDoc, bson.E{"price", food.Price})
+		}
+		if food.FoodImage != nil {
+			updateDoc = append(updateDoc, bson.E{"foodImage", food.FoodImage})
+		}
+		if food.MenuId != nil {
+			err := menuCollection.FindOne(ctx, bson.M{"menuId": food.MenuId}).Decode(&menu)
+			defer cancel()
+			if err != nil {
+				msg := fmt.Sprintf("message: Menu not found")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": msg})
+				return
+			}
+			updateDoc = append(updateDoc, bson.E{"menuId", food.MenuId})
+		}
+
+		food.UpdatedAt, _ = time.Parse(time.RFC3339, time.Now().Format(time.RFC3339))
+		updateDoc = append(updateDoc, bson.E{"updatedAt", food.UpdatedAt})
+
+		upsert := true
+		filter := bson.M{"foodId": foodId}
+
+		opt := options.UpdateOptions{
+			Upsert: &upsert,
+		}
+
+		result, err := foodCollection.UpdateOne(ctx, filter, bson.D{
+			{"$set", updateDoc},
+		},
+			&opt,
+		)
+
+		if err != nil {
+			msg := fmt.Sprint("food item update failed")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": msg})
+			return
+		}
+		c.JSON(http.StatusOK, result)
 	}
 }
 
 func round(num float64) int {
-
+	return int(num + math.Copysign(0.5, num))
 }
 
 func toFixed(num float64, precision int) float64 {
-
+	output := math.Pow(10, float64(precision))
+	return float64(round(num*output)) / output
 }
